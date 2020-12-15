@@ -1,0 +1,328 @@
+---
+title: "Predicting Heart Disease"
+author: "Cary Dean Turner"
+date: "11/14/2020"
+output: pdf_document
+header-includes:
+- \usepackage{booktabs}
+- \usepackage{sectsty} \sectionfont{\centering \emph}
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r, echo=FALSE, include=FALSE}
+#### Read in the data sets ####
+
+train <- read.csv('train_data.csv')
+test <- read.csv('test_data.csv')
+
+#### Data Exploration ####
+
+library(tidyverse)
+library(GGally)
+library(corrplot)
+
+# Get rid of ID variable
+train <- train[,-12]
+test <- test[,-11]
+
+```
+
+## Part One: Prediction  
+  
+  The goal of this part of the project is to predict the binary Status (TRUE or FALSE for having heart disease) from the other features in the data set. Our features (which have all been standardized) are:  
+  
+  -old_assay: a previous biological measurement used to predict this disease  
+  -gold_standard: standard-of-care predictive score of this disease  
+  -assay: a new assay developed recently  
+  -BP: a measure of blood pressure  
+  -smoking: a measure of cumulative tobacco use  
+  -alcohol: a measure of alcohol consumption  
+  -cholesterol: a measure of cholesterol  
+  -behavior: a behavioral measure estimating risk for this disease  
+  -BMI: Body Mass Index  
+  -age: subject age  
+  -Status: disease status (1 or 0)  
+  
+### Initial Data Exploration  
+  
+  I began my data exploration by looking for relationships between the set of predictors using pairwise scatterplots between each pair of variables. I also computed the correlation matrix and used it to graph a correlation plot to determine the predictors which were most strongly associated with the outcome variable `Status`. `assay` and `gold_standard` proved to be the most strongly correlated with `Status`, followed by `age`, so those will certainly be variables of interest throughout the analysis. I then squared and subsequently cubed all variables and created correlation plots of all of these to view their relationships to `Status`. I similarly log transformed all variables (adding 10 to avoid attempted logging of non-positive values) and graphed their correlations as well.  
+  
+  Ultimately, the squared variables don't seem to have any relation to status (likely because it turns negative values positive), but $assay^3$ and $(gold\ standard)^3$ both have strong correlation with `Status`, so there is justification for including them in predictive models. Similarly, $log(assay+10)$ and $log(gold\ standard + 10)$ both have moderately strong correlation with `Status`, so they will be included in some predictive models as well.
+  
+  
+### Pairwise Scatterplots of Untransformed Data
+```{r, fig.width=4, fig.height=4, fig.align='center', echo=FALSE}
+# Generate scatter plot of each pair of variables
+ggpairs(train)
+```
+  
+### Correlation Plot of Non-Transformed Variables
+```{r, fig.width=3.5, fig.height=3, fig.align='center', echo=FALSE}
+# Look for correlation between variables and response
+correl <- cor(train)
+corrplot(correl)
+```
+  
+
+```{r, fig.width=4, fig.height=4, fig.align='center', echo=FALSE}
+# Try cubed vars, so negative numbers stay negative
+cubed.vars <- train[,-11]^3
+cubed.cor <- cor(data.frame(cubed.vars, train$Status))
+#corrplot(cubed.cor) # Looks like assay^3 and gold_standard^3 correlated w Status
+
+log.vars <- log(train[,-11] + 10)
+log.cor <- cor(data.frame(log.vars, train$Status))
+#corrplot(log.cor, title='Logged Variables')
+
+# Cubed test vars, for use in prediction
+cubed.vars.test <- test^3
+```
+  
+  
+I also used principal component analysis to plot the observations on the first two principal component score vectors, as seen below. Ultimately, the first two principal component score vectors only account for ~40% of the variation in the data, so there doesn't appear to be much separability of the two classes.  
+
+```{r, echo=FALSE}
+# Principal Component Analysis
+pr.out <- prcomp(train[,-11])
+plot(pr.out$x[,1:2], col=train$Status+3, pch=19, xlab='Z1', ylab='Z2')
+par(mfrow=c(1,2))
+plot(summary(pr.out)$importance[2,], xlab='Principal Component', 
+     ylab='PVE', col='blue', type='o')
+plot(summary(pr.out)$importance[3,], xlab='Principal Component', 
+     ylab='Cumulative PVE', col='red', type='o')
+```
+
+Using K-means clustering with $K=2$ correctly clustered 58.1% of the training observations:  
+```{r}
+clusters <- kmeans(train, 2, nstart=20)
+table(clusters$cluster ,train$Status)
+```
+  
+  
+### Building Predictive Models  
+  
+  Before building any models, I calculated the proportion of positive `Status` values as a baseline for my predictions, the logic being that any classifier could at least obtain that level of accuracy by simply predicting a positive outcome for all observations. In this case, the proportion of positive observations is 59.8%, so any model which predicts with less accuracy than that is worthless.  
+  
+  Next, I built a basic logistic regression model using all the predictors as well as one using all the predictors and all two-way interaction terms. Using ten-fold cross-validation on both, I got an estimated CV error of ~0.33. However, both of them performed rather poorly on the actual test data, both yielding a test error of 0.39.  
+  
+  I then trained a lasso model and used ten-fold cross-validation to find the optimal value of lambda, using AUC as the value to be maximized. Doing this resulted in an optimal lambda value of 0.0201 and a CV estimated test AUC of 0.7665. When making predictions on the test data, I used a probability threshold of 0.56; that is, any predicted value greater than 0.56 is labeled as TRUE and all other outcomes are labeled as FALSE. These predictions on the test data resulted in an accuracy of 0.70, which is the highest out of any of my predictive models.  
+  
+  Because I don't have access to the actual test labels, I computed the confusion matrix and plotted the ROC curve using the training data. The training AUC is 0.7871, which is close to the CV estimated AUC.
+  
+  I also trained models using K-nearest neighbors, support vector machines, linear/quadratic discriminant analysis, random forest, and ridge regression, but none of them yielded as good of results as the lasso. The code for all of these models can be found attached to this report.
+
+
+```{r, fig.width=2, fig.height=3, fig.align='center', echo=FALSE, include=FALSE}
+#### Lasso Time, yee haw ####
+library(glmnet)
+library(cvTools)
+library(ROCR)
+```
+```{r, echo=FALSE}
+# Create model matrix
+form <- Status ~ . + .^2 + log(assay + 10) + log(gold_standard + 10)
+x.train <- model.matrix(form, data=data.frame(train, cubed.vars))
+y.train <- train$Status
+x.test <- model.matrix(form, data=data.frame(test, cubed.vars.test, Status=1:200))
+
+# Cross validate to find optimal value of lambda
+lasso.mod <- cv.glmnet(x.train, y.train, type.measure='auc', alpha=1, 
+                      family='binomial',seed=138)
+plot(lasso.mod$lambda, lasso.mod$cvm, xlab='Lambda', ylab='AUC', main='Lasso')
+lasso.lambda <- lasso.mod$lambda.min
+lasso.auc <- max(lasso.mod$cvm)
+
+# Function to compute the AUC of a binary classifier
+compute_auc <- function(p, labels) {
+  pred <- prediction(p, labels)
+  auc <- performance(pred, 'auc')
+  auc <- unlist(slot(auc, 'y.values'))
+  auc
+}
+
+# Function to plot the ROC curve of a binary classifier
+plot_roc <- function(p, labels, model_name) {
+  pred <- prediction(p, labels)
+  perf <- performance(pred,"tpr","fpr")
+  plot(perf, col="black", main = paste('', model_name))
+}
+```
+  
+  
+  
+```{r, fig.width=4.5, fig.height=4, fig.align='center', echo=FALSE}
+# Plot Training ROC for our chosen model
+plot_roc(predict(lasso.mod, x.train, s=lasso.lambda), train$Status, 
+         paste('Training ROC: Lambda =', lasso.lambda))
+lasso.train.auc <- compute_auc(predict(lasso.mod, x.train, s=lasso.lambda), train$Status)
+#lasso.train.auc
+
+# Make predictions on training data
+lasso.prob.train <- predict(lasso.mod, x.train, s=lasso.lambda)
+lasso.pred.train <- lasso.prob.train > 0.56
+
+```
+     
+  
+### Confusion Matrix Using Training Data:
+```{r, echo=FALSE}
+# Create confusion matrix
+lasso.conf.mat <- table(Predicted=lasso.pred.train, Observed=train$Status)
+lasso.conf.mat
+
+# Compute classification metrics
+TP <- lasso.conf.mat[2,2]
+TN <- lasso.conf.mat[1,1]
+FP <- lasso.conf.mat[2,1]
+FN <- lasso.conf.mat[1,2]
+n <- TP + TN + FP + FN
+accuracy <- (TP + TN) / n
+zo.loss <- (FP + FN) / n
+TPR <- TP / (FN + TP)
+FPR <- FP / (TN + FP)
+TNR <- TN / (TN + FP)
+FNR <- FN / (FN + TP)
+precision <- TP / (TP + FP)
+false.discovery <- FP / (TP + FP)
+
+Lasso <- c(accuracy, zo.loss, TPR, TNR, precision, FPR, FNR, false.discovery, lasso.train.auc, lasso.auc)
+Metric <- c('Accuracy', '0-1 Loss', 'Sensitivity', 'Specificity', 'Precision',
+            'Type I Error Rate', 'Type II Error Rate', 'False Discovery Rate', 'Training AUC', 'CV AUC')
+```
+   
+  
+### Metrics computed on training data using lasso with lambda=0.0201:
+```{r, echo=FALSE}
+tibble(Metric, Lasso)
+
+
+```
+  
+  
+  
+### Test Prediction Accuracy For All Models:  
+```{r, echo=FALSE}
+model <- c('Lasso', 'QDA', 'LDA', 'SVM', 'Logistic Regression', 'KNN', 'Ridge', 'Random Forest')
+test.accuracy <- c(0.7, 0.66, 0.65, 0.65, 0.61, 0.59, 0.58, 0.57)
+test.results <- data.frame(model, test.accuracy)
+colnames(test.results) <- c('Model Type', 'Test Accuracy')
+test.results
+```
+
+
+## Part Two: Inference on the Efficacy of Assay  
+
+Ultimately, we'd like not only to make good predictions, but also to get an idea of the how effective assay is at predicting Status, particularly compared to gold_standard, which is what is currently being used. To get a better idea of how well assay predicts Status, I first ran some straightforward logistic regression models trained on both the original training data and the follow-up data, for a total of $n=1200$ observations, the reason being that if our goal is to accurately assess the efficacy of assay, we want to make use of all the data that is available to us.  
+  
+  Both models use the set of covariates {BP, smoking, cholesterol, behavior, BMI, alcohol, age, old_assay} which we will call $W$ for simplicity. My first model predicts Status using the covariates $W+gold.standard$. The output gives an estimated coefficient of 0.6647 for gold_standard, which is significant at the < .001% level, implying that gold_standard is very likely predictive of Status, which makes sense. In my second model, I fit a logistic regression model to predict Status using $W+assay$, excluding gold_standard. Here I found that the estimated coefficient for assay was 0.8416, also statistically significant at the < .001% level. Because gold_standard and assay are on the same scale, we can directly compare coefficient magnitudes. The fact that the coefficient for assay is a fair amount larger than the coefficient for gold_standard was indicates that it's likely that assay is actually a better predictor of Status than is gold_standard. The 95% confidence intervals for each can be seen below:  
+
+```{r, echo=FALSE, include=FALSE}
+# First, combine both data sets to perform inference on the effect of assay vs. gold_standard
+
+new.data <- read_csv('followup_data.csv')
+new.data <- new.data[,-12]
+train <- rbind(train, new.data)
+```
+```{r, echo=FALSE}
+gold.mod <- glm(Status ~ . - assay, data=train, family='binomial')
+#summary(gold.mod)$coef
+
+assay.mod <- glm(Status ~ . - gold_standard, data=train, family='binomial')
+#summary(assay.mod)$coef
+
+full.mod <- glm(Status ~ ., data=train, family='binomial')
+#summary(full.mod)$coef
+
+### Compute Confidence Intervals ###
+
+gold.int.norm <- c(0.664723-1.96*0.070062, 0.664723+1.96*0.070062)
+assay.int.norm <- c(0.841574-1.96*0.073450, 0.841574+1.96*0.073450)
+CI.norm <- data.frame(gold.int.norm, assay.int.norm)
+colnames(CI.norm) <- c('Gold Standard', 'Assay')
+CI.norm <- data.frame(t(CI.norm))
+colnames(CI.norm) <- c('Low', 'High')
+CI.norm$Width <- CI.norm$High - CI.norm$Low
+CI.norm
+```
+  
+Next, I fit another logistic regression model using *all* covariates; that is, $W+gold.standard+assay$, and inspected the resulting output. This time, we see an estimated coefficient of 0.7751 for assay, statistically significant at the < .001% level. Our estimated coefficient for gold_standard, however, was only 0.0886, and is not statistically significant, with a p-value of 0.3946. However, I assumed this may be due to collinearity in the data, since gold_standard and assay are highly correlated. To investigate further, I performed the bootstrap to estimate the distributions of both gold_standard and assay, thinking perhaps that sometimes gold_standard would come up as signficant and other times the predictive effect would be attributed to assay instead, so that over 10,000 repititions they would balance out. What I found, however, was that while the coefficient for gold_standard bounced around between positive and negative values, the coefficient for assay stayed strictly positive, adding to the evidence that assay is a better predictor of Status. 
+
+### Bootstrapped Distributions 
+```{r, echo=FALSE}
+gold.standard <- rep(0, 10000)
+assay <- rep(0, 10000)
+
+for (i in 1:10000) {
+  boot.samp <- sample(1:nrow(train), nrow(train), replace=TRUE)
+  df <- train[boot.samp,]
+  #mod1 <- glm(Status ~ . - assay, data=df, family='binomial')
+  mod1 <- glm(Status ~ ., data=df, family='binomial')
+  gold.standard[i] <- summary(mod1)$coef[10,1]
+  #mod2 <- glm(Status ~ . - gold_standard, data=df, family='binomial')
+  assay[i] <- summary(mod1)$coef[11,1]
+}
+
+par(mfrow=c(1,2))
+hist(gold.standard)
+hist(assay)
+```
+
+### Bootstrapped Confidence Intervals For assay and gold_standard
+```{r, echo=FALSE}
+se.gold <- sd(gold.standard)
+se.assay <- sd(assay)
+
+gold.int.boot <- c(mean(gold.standard)-1.96*se.gold, mean(gold.standard)+1.96*se.gold)
+assay.int.boot <- c(mean(assay)-1.96*se.assay, mean(assay)+1.96*se.assay)
+CI.boot <- data.frame(gold.int.boot, assay.int.boot)
+colnames(CI.boot) <- c('Gold Standard', 'Assay')
+CI.boot <- data.frame(t(CI.boot))
+colnames(CI.boot) <- c('Low', 'High')
+CI.boot$Width <- CI.boot$High - CI.boot$Low
+CI.boot
+```
+
+Additionally, I fit a random forest model and a boosted model using both assay and gold_standard. Both methods indicated that assay is a more important predictor, as seen in the output below:
+
+### Boosted Model Fit
+```{r, echo=FALSE, include=FALSE}
+library(gbm)
+```
+
+```{r, echo=FALSE}
+set.seed(4)
+boost.fit <- gbm(Status ~ ., data=train, distribution='bernoulli', n.trees=5000, interaction.depth=4)
+summary(boost.fit) # validates the finding that assay is a better predictor than gold_standard
+```
+
+
+### Random Forest Fit  
+```{r, echo=FALSE, include=FALSE}
+### Random Forest
+library(randomForest)
+```
+```{r, echo=FALSE}
+rf <- randomForest(as.factor(Status) ~ ., data=train, mtry=4, importance=TRUE)
+importance(rf)
+varImpPlot(rf)
+# Further validation
+```
+  
+## Predictive Power on the Test Data
+  
+Since ultimately we are trying to assess how well these two variables predict Status, my next step was to re-fit two new predictive models using the lasso, which was my best performing model on the test data. The first one uses $W+gold.standard$ and the second uses $W+assay$. The model using gold_standard achieved 63% accuracy, while the model using assay acieved 66% accuracy. 
+  
+   
+   
+## Conclusion  
+
+Predicting with assay instead of gold_standard did yield better results, but not by any huge margin. This implies that perhaps assay isn't significantly better on its own than gold_standard is. However, this is compared to my original predictive model which used both assay and gold_standard, and achieved 70% accuracy on the test data, indicating that using both assay and gold_standard does indeed lead to better predictions on Status than using gold_standard alone. In short, although assay is a somewhat better substitute for gold_standard, its best results are only seen when both are used together to predict Status.
+
+
+
+
+
+
